@@ -5,6 +5,33 @@ import unicodedata
 from pathlib import Path
 from typing import Dict, Tuple, List, Optional, Any
 
+FIELDS_ORIGINAL_STEMS = {
+    "Byz",
+    "StatResGNT",
+    "TR",
+    "MapM",
+    "WLC",
+    "SP",
+    "VulgClementine",
+    "VulgHetzenauer",
+    "Vulgate",
+    "VulgSistine",
+    "Peshitta",
+}
+
+def _fields_value_for_db(db_filename: str) -> str:
+    # db_filename é algo como "KJVS.db"
+    db_filename = str(db_filename)
+    stem = Path(db_filename).stem  # "KJVS", "LXXS", "Byz", etc.
+
+    if db_filename in {"KJVS.db", "ESVS.db"}:
+        return "translation, dStrong"
+    if db_filename == "LXXS.db":
+        return "original, dStrong, grammar"
+    if stem in FIELDS_ORIGINAL_STEMS and db_filename.endswith(".db"):
+        return "original"
+
+    return "translation"
 
 ENGLISH_TO_PORTUGUESE = {
     # Antigo Testamento
@@ -620,14 +647,25 @@ def _verify_already_formatted(
     portuguese_norm_to_id: Dict[str, int],
     portuguese_norm_to_name: Dict[str, str],
     english_norm_to_portuguese: Dict[str, str],
+    expected_fields_value: str,
 ) -> bool:
     tables = _list_tables(conn)
-    if set(tables) != {"books", "verses"}:
+    if set(tables) != {"books", "verses", "fields"}:
         return False
 
     books_cols = _get_table_columns(conn, "books")
     verses_cols = _get_table_columns(conn, "verses")
+    fields_cols = _get_table_columns(conn, "fields")
+    fields_norm = {_norm_key(c) for c in fields_cols}
+    if fields_norm != {_norm_key("fields")}:
+        return False
 
+    curf = conn.execute("SELECT fields FROM fields")
+    rows = curf.fetchall()
+    if len(rows) != 1:
+        return False
+    if rows[0][0] != expected_fields_value:
+        return False
     if not _validate_books_schema(books_cols):
         return False
     if not _validate_verses_schema(verses_cols):
@@ -673,7 +711,7 @@ def _verify_already_formatted(
     return True
 
 
-def _create_expected_schema(conn: sqlite3.Connection) -> None:
+def _create_expected_schema(conn: sqlite3.Connection, fields_value: str) -> None:
     cur = conn.cursor()
     cur.execute("CREATE TABLE books (id INTEGER NOT NULL, name TEXT NOT NULL)")
     # verse como TEXT para permitir valores fracionados: 23.1, 23.2, ...
@@ -682,6 +720,9 @@ def _create_expected_schema(conn: sqlite3.Connection) -> None:
     )
     cur.execute("CREATE INDEX idx_books_id ON books(id)")
     cur.execute("CREATE INDEX idx_verses_book_chap_verse ON verses(book_id, chapter, verse)")
+    cur.execute("CREATE TABLE fields (fields TEXT NOT NULL)")
+    cur.execute("INSERT INTO fields (fields) VALUES (?)", (fields_value,))
+
     conn.commit()
 
 
@@ -712,6 +753,7 @@ def _reformat_one_db(db_path: Path) -> None:
 
     _require_dicts()
     portuguese_norm_to_id, portuguese_norm_to_name, english_norm_to_portuguese = _build_mappings()
+    expected_fields_value = _fields_value_for_db(db_path.name)
 
     try:
         conn = sqlite3.connect(str(db_path))
@@ -725,6 +767,7 @@ def _reformat_one_db(db_path: Path) -> None:
             portuguese_norm_to_id,
             portuguese_norm_to_name,
             english_norm_to_portuguese,
+            expected_fields_value,
         ):
             print("OK: Já está exatamente no formato esperado. Pulando.")
             return
@@ -830,7 +873,7 @@ def _reformat_one_db(db_path: Path) -> None:
 
         out_conn = sqlite3.connect(str(tmp_path))
         try:
-            _create_expected_schema(out_conn)
+            _create_expected_schema(out_conn, expected_fields_value)
 
             out_cur = out_conn.cursor()
 
